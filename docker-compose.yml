@@ -1,137 +1,29 @@
 version: '3.8'
 
 services:
-  sdn_router:
-    build:
-      context: .
-      dockerfile: Dockerfile.router
-    container_name: sdn_router
-    privileged: true
-    cap_add:
-      - NET_ADMIN
-    volumes:
-      - ./setup_router.sh:/setup_router.sh:ro
-    command: /setup_router.sh
-    networks:
-      wan_network:
-        ipv4_address: 10.199.4.10    # SAFE IP
-      transit_network:
-        ipv4_address: 10.199.1.10    # SAFE IP
-
-  core_switch:
+  gateway:
     image: alpine:latest
-    container_name: core_switch
-    privileged: true
-    cap_add:
-      - NET_ADMIN
-    command: >
-      sh -c "
-        apk add --no-cache openvswitch iproute2 &&
-        sysctl -w net.ipv4.ip_forward=1 &&
-        export OVS_USERSPACE_ONLY=1 &&
-        /usr/share/openvswitch/scripts/ovs-ctl start &&
-        
-        ovs-vsctl --may-exist add-br br-core -- set bridge br-core datapath_type=netdev &&
-        ovs-vsctl --may-exist add-port br-core eth0 &&
-        ovs-vsctl --may-exist add-port br-core eth1 &&
-        ovs-vsctl --may-exist add-port br-core eth2 &&
-        
-        ip addr flush dev eth0 &&
-        ip addr flush dev eth1 &&
-        ip addr flush dev eth2 &&
-        
-        ip addr add 10.199.1.20/24 dev br-core &&  # SAFE IP
-        ip addr add 10.199.2.20/24 dev br-core &&  # SAFE IP
-        ip addr add 10.199.3.20/24 dev br-core &&  # SAFE IP
-        ip link set br-core up &&
-        
-        ovs-ofctl add-flow br-core \"priority=0,actions=NORMAL\" &&
-        ip route replace default via 10.199.1.10 && # Point to Router
-        sleep infinity
-      "
+    container_name: gateway
+    privileged: true # REQUIRED for iptables
+    volumes:
+      - ./setup-router.sh:/setup-router.sh:ro
+    command: sh -c "apk add iptables && chmod +x /setup-router.sh && /setup-router.sh"
     networks:
-      transit_network:
-        ipv4_address: 10.199.1.20
-      admin_network:
-        ipv4_address: 10.199.2.20
-      guest_network:
-        ipv4_address: 10.199.3.20
+      - lab_net
 
-  admin_web_server:
+  victim_server:
     image: nginx:alpine
-    container_name: admin_web_server
-    cap_add:
-      - NET_ADMIN
-    command: sh -c "sleep 5 ; ip route replace default via 10.199.2.20 ; nginx -g 'daemon off;'"
+    container_name: victim_server
     networks:
-      admin_network:
-        ipv4_address: 10.199.2.100
-    depends_on:
-      - core_switch
+      - lab_net
 
-  guest_api_server:
+  attacker_client:
     image: python:alpine
-    container_name: guest_api_server
-    cap_add:
-      - NET_ADMIN
-    command: sh -c "sleep 5 ; ip route replace default via 10.199.3.20 ; echo 'Guest API Running' > index.html ; python -m http.server 3000"
+    container_name: attacker_client
+    command: tail -f /dev/null
     networks:
-      guest_network:
-        ipv4_address: 10.199.3.101
-    depends_on:
-      - core_switch
-
-  external_client:
-    image: python:alpine
-    container_name: external_client
-    cap_add:
-      - NET_ADMIN
-    volumes:
-      - ./attacks:/attacks
-    command: sh -c "sleep 5 ; ip route add 10.199.0.0/16 via 10.199.4.10 ; tail -f /dev/null"
-    networks:
-      wan_network:
-        ipv4_address: 10.199.4.100
-
-  telemetry_sniffer:
-    build:
-      context: .
-      dockerfile: Dockerfile.sniffer
-    container_name: telemetry_sniffer
-    network_mode: host
-    privileged: true
-    restart: unless-stopped
-
-  ui_dashboard:
-    image: python:3.9-slim
-    container_name: ui_dashboard
-    ports:
-      - "8501:8501" 
-    volumes:
-      - ./dashboard.py:/app/dashboard.py
-    working_dir: /app
-    command: sh -c "pip install streamlit websockets pandas && streamlit run dashboard.py --server.port=8501 --server.address=0.0.0.0"
-    environment:
-      - API_URI=ws://host.docker.internal:8000/ws/ui_stream
+      - lab_net
 
 networks:
-  wan_network:
+  lab_net:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 10.199.4.0/24
-  transit_network:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 10.199.1.0/24
-  admin_network:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 10.199.2.0/24
-  guest_network:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 10.199.3.0/24

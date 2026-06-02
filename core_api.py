@@ -202,7 +202,9 @@ async def live_network_endpoint(websocket: WebSocket):
             ui_clients.difference_update(dead_clients)
 
             # --- ACTUATION ---
-            if last_action == 1 and src_ip not in blocked_ips and src_ip != "10.199.1.20":
+            # Assuming your gateway is 10.199.1.10 (from your docker-compose)
+            GATEWAY_IP = "10.199.1.10" 
+            if last_action == 1 and src_ip not in blocked_ips and src_ip != GATEWAY_IP:
                 if sustained_confidence > 0.35 or (sig_lat > 0.5 and max(conf_buf) > 0.28):
                     blocked_ips.add(src_ip)
                     MASTER_STATE["blocked_ips"] = list(blocked_ips)
