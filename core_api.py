@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import asyncio
 import numpy as np
 import torch
@@ -13,7 +14,7 @@ from stable_baselines3 import PPO
 from openflow_actuator import switch_route
 
 # =============================================================================
-# 1. MODEL ARCHITECTURES (Unchanged)
+# 1. MODEL ARCHITECTURES
 # =============================================================================
 class RobustLSTMAutoencoder(nn.Module):
     def __init__(self, input_dim=40, hidden_dim=64):
@@ -80,21 +81,29 @@ MASTER_STATE = {
     "blocked_ips": []
 }
 
-ui_clients = set()
+blocked_ip_timers = {}  # Tracks when an IP was blocked
 
-@app.websocket("/ws/ui_stream")
-async def ui_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    ui_clients.add(websocket)
-    print("🖥️  UI Dashboard Connected!")
-    try:
-        # Send initial state immediately
-        await websocket.send_json(MASTER_STATE)
-        while True:
-            await websocket.receive_text() # Keep connection alive
-    except WebSocketDisconnect:
-        ui_clients.remove(websocket)
-        print("🖥️  UI Dashboard Disconnected.")
+# Safer HTTP Endpoint for Streamlit Dashboard
+@app.get("/api/state")
+def get_network_state():
+    return MASTER_STATE
+
+# Auto-Heal Background Task (Fixes Deadlock)
+async def auto_heal_loop():
+    while True:
+        now = time.time()
+        for ip in list(MASTER_STATE["blocked_ips"]):
+            if now - blocked_ip_timers.get(ip, 0) > 60:  # 60 Second block duration
+                MASTER_STATE["blocked_ips"].remove(ip)
+                if ip in blocked_ip_timers:
+                    del blocked_ip_timers[ip]
+                asyncio.create_task(asyncio.to_thread(switch_route, 0, ip))
+                print(f"🟢 [AI HEAL] Timeout reached. Restoring flow for {ip}")
+        await asyncio.sleep(5)
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(auto_heal_loop())
 
 # =============================================================================
 # 4. LIVE TELEMETRY ENDPOINT
@@ -108,22 +117,18 @@ async def live_network_endpoint(websocket: WebSocket):
     vol_buf = deque([0.0]*60, maxlen=60)
     conf_buf = deque(maxlen=5)
     adaptive_baseline = {"ema": obs_threshold * 0.5, "n": 0, "last_cluster": 0, "cluster_stable_count": 0}
-    blocked_ips = set()
     last_action = 0
 
     try:
         while True:
             data = await websocket.receive_text()
             payload = json.loads(data)
-            
             src_ip = payload.get("src_ip", "0.0.0.0")
             
-            # --- UPDATE TOPOLOGY STATE ---
             if "topology_nodes" in payload:
                 MASTER_STATE["topology"].update(payload["topology_nodes"])
 
             legacy_input = np.zeros((1, 40), dtype=np.float32)
-            
             q_latency = payload.get("queue_latency", 0.0)
             q_volume = payload.get("queue_volume", 0.0)
             throughput = payload.get("throughput", 0)
@@ -151,7 +156,6 @@ async def live_network_endpoint(websocket: WebSocket):
             if len(seq_buf) < 10:
                 continue
 
-            # --- INFERENCE ---
             in_seq = torch.tensor(np.array([list(seq_buf)]), dtype=torch.float32).to(device)
             v_seq = torch.tensor(np.array([list(vol_buf)]), dtype=torch.float32).unsqueeze(-1).to(device)
 
@@ -164,7 +168,6 @@ async def live_network_endpoint(websocket: WebSocket):
                 cluster_id = int(analyst_model.predict(an_in)[0])
                 traffic_type = 1.0 if cluster_map.get(str(cluster_id), "") == "Video/Heavy" else 0.0
 
-            # --- CONFIDENCE MATRICES ---
             ema = adaptive_baseline["ema"]
             if mae < obs_threshold:
                 ema = 0.02 * mae + 0.98 * ema
@@ -180,46 +183,22 @@ async def live_network_endpoint(websocket: WebSocket):
             sustained_confidence = float(np.mean(conf_buf))
 
             state = np.array([[q_latency, 0.05, mae, base_conf, traffic_type, float(last_action)]], dtype=np.float32)
-
             action, _ = manager.predict(state, deterministic=True)
             last_action = int(action[0])
 
-            # --- UPDATE MASTER UI STATE ---
             MASTER_STATE["metrics"] = {
                 "confidence": round(sustained_confidence, 3),
                 "latency": round(q_latency, 4),
                 "throughput": throughput
             }
-            MASTER_STATE["blocked_ips"] = list(blocked_ips)
 
-            # Broadcast to UI
-            dead_clients = set()
-            for client in ui_clients:
-                try:
-                    await client.send_json(MASTER_STATE)
-                except:
-                    dead_clients.add(client)
-            ui_clients.difference_update(dead_clients)
-
-            # --- ACTUATION ---
-            # Assuming your gateway is 10.199.1.10 (from your docker-compose)
-            GATEWAY_IP = "10.199.1.10" 
-            if last_action == 1 and src_ip not in blocked_ips and src_ip != GATEWAY_IP:
+            # Actuation trigger
+            if last_action == 1 and src_ip not in MASTER_STATE["blocked_ips"] and src_ip != "10.199.1.20":
                 if sustained_confidence > 0.35 or (sig_lat > 0.5 and max(conf_buf) > 0.28):
-                    blocked_ips.add(src_ip)
-                    MASTER_STATE["blocked_ips"] = list(blocked_ips)
-                    
-                    # --- CALLING YOUR openflow_actuator.py HERE ---
+                    MASTER_STATE["blocked_ips"].append(src_ip)
+                    blocked_ip_timers[src_ip] = time.time()
                     asyncio.create_task(asyncio.to_thread(switch_route, 1, src_ip))
-                    
                     await websocket.send_json({"status": "blocked", "ip": src_ip})
-            # 🟢 OPTIONAL: Automatic Healing / Unblocking
-            elif last_action == 0 and src_ip in blocked_ips:
-                blocked_ips.remove(src_ip)
-                MASTER_STATE["blocked_ips"] = list(blocked_ips)
-                # Call switch_route with 0 to clear the drop rule
-                asyncio.create_task(asyncio.to_thread(switch_route, 0, src_ip))
-                print(f"🟢 [AI HEAL] Traffic normalized. Restoring flow for {src_ip}")                    
 
     except WebSocketDisconnect:
         print("❌ Live Sniffer Disconnected.")

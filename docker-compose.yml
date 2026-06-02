@@ -1,29 +1,77 @@
 version: '3.8'
 
 services:
-  gateway:
+  core_switch:
     image: alpine:latest
-    container_name: gateway
-    privileged: true # REQUIRED for iptables
-    volumes:
-      - ./setup-router.sh:/setup-router.sh:ro
-    command: sh -c "apk add iptables && chmod +x /setup-router.sh && /setup-router.sh"
+    container_name: core_switch
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+    command: >
+      sh -c "
+        apk add --no-cache openvswitch iproute2 &&
+        /usr/share/openvswitch/scripts/ovs-ctl start &&
+        ovs-vsctl --may-exist add-br br-core -- set bridge br-core datapath_type=netdev &&
+        ovs-ofctl add-flow br-core \"priority=0,actions=NORMAL\" &&
+        sleep infinity
+      "
     networks:
-      - lab_net
+      twin_network:
+        ipv4_address: 10.199.1.20
 
-  victim_server:
+  admin_web_server:
     image: nginx:alpine
-    container_name: victim_server
+    container_name: admin_web_server
     networks:
-      - lab_net
+      twin_network:
+        ipv4_address: 10.199.1.100
 
-  attacker_client:
+  guest_api_server:
     image: python:alpine
-    container_name: attacker_client
+    container_name: guest_api_server
+    command: sh -c "echo 'Guest API Running' > index.html ; python -m http.server 3000"
+    networks:
+      twin_network:
+        ipv4_address: 10.199.1.101
+
+  external_client:
+    image: python:alpine
+    container_name: external_client
     command: tail -f /dev/null
     networks:
-      - lab_net
+      twin_network:
+        ipv4_address: 10.199.1.110
+
+  telemetry_sniffer:
+    build:
+      context: .
+      dockerfile: Dockerfile.sniffer
+    container_name: telemetry_sniffer
+    network_mode: host
+    privileged: true
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - API_URI=ws://host.docker.internal:8000/ws/network_state
+
+  ui_dashboard:
+    image: python:3.12-slim
+    container_name: ui_dashboard
+    ports:
+      - "8501:8501" 
+    volumes:
+      - ./dashboard.py:/app/dashboard.py
+    working_dir: /app
+    command: sh -c "pip install streamlit requests pandas && streamlit run dashboard.py --server.port=8501 --server.address=0.0.0.0"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - API_URI=http://host.docker.internal:8000/api/state
 
 networks:
-  lab_net:
+  twin_network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 10.199.1.0/24
