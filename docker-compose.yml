@@ -9,17 +9,14 @@ services:
     privileged: true
     cap_add:
       - NET_ADMIN
-    ports:
-      - "8080:80"
-      - "2222:22"
     volumes:
       - ./setup_router.sh:/setup_router.sh:ro
     command: /setup_router.sh
     networks:
       wan_network:
-        ipv4_address: 172.20.0.2
+        ipv4_address: 10.199.4.10    # SAFE IP
       transit_network:
-        ipv4_address: 10.0.0.1
+        ipv4_address: 10.199.1.10    # SAFE IP
 
   core_switch:
     image: alpine:latest
@@ -34,47 +31,41 @@ services:
         export OVS_USERSPACE_ONLY=1 &&
         /usr/share/openvswitch/scripts/ovs-ctl start &&
         
-        # Build Level 1 distribution bridge
         ovs-vsctl --may-exist add-br br-core -- set bridge br-core datapath_type=netdev &&
-        
-        # Dynamically map all active interface links to OVS ports
         ovs-vsctl --may-exist add-port br-core eth0 &&
         ovs-vsctl --may-exist add-port br-core eth1 &&
         ovs-vsctl --may-exist add-port br-core eth2 &&
         
-        # Flush base Linux IP configurations to rely on OVS internal routing
         ip addr flush dev eth0 &&
         ip addr flush dev eth1 &&
         ip addr flush dev eth2 &&
         
-        # Provision network topology endpoints on the bridge
-        ip addr add 10.0.0.2/24 dev br-core &&
-        ip addr add 10.0.10.1/24 dev br-core &&
-        ip addr add 10.0.20.1/24 dev br-core &&
+        ip addr add 10.199.1.20/24 dev br-core &&  # SAFE IP
+        ip addr add 10.199.2.20/24 dev br-core &&  # SAFE IP
+        ip addr add 10.199.3.20/24 dev br-core &&  # SAFE IP
         ip link set br-core up &&
         
-        # Push standard traffic default flows to pass out the router pipeline
         ovs-ofctl add-flow br-core \"priority=0,actions=NORMAL\" &&
-        ip route replace default via 10.0.0.1 &&
+        ip route replace default via 10.199.1.10 && # Point to Router
         sleep infinity
       "
     networks:
       transit_network:
-        ipv4_address: 10.0.0.2
+        ipv4_address: 10.199.1.20
       admin_network:
-        ipv4_address: 10.0.10.1
+        ipv4_address: 10.199.2.20
       guest_network:
-        ipv4_address: 10.0.20.1
+        ipv4_address: 10.199.3.20
 
   admin_web_server:
     image: nginx:alpine
     container_name: admin_web_server
     cap_add:
       - NET_ADMIN
-    command: sh -c "ip route replace default via 10.0.10.1 && nginx -g 'daemon off;'"
+    command: sh -c "sleep 5 ; ip route replace default via 10.199.2.20 ; nginx -g 'daemon off;'"
     networks:
       admin_network:
-        ipv4_address: 10.0.10.100
+        ipv4_address: 10.199.2.100
     depends_on:
       - core_switch
 
@@ -83,10 +74,10 @@ services:
     container_name: guest_api_server
     cap_add:
       - NET_ADMIN
-    command: sh -c "ip route replace default via 10.0.20.1 && echo 'Guest API Running' > index.html && python -m http.server 3000"
+    command: sh -c "sleep 5 ; ip route replace default via 10.199.3.20 ; echo 'Guest API Running' > index.html ; python -m http.server 3000"
     networks:
       guest_network:
-        ipv4_address: 10.0.20.101
+        ipv4_address: 10.199.3.101
     depends_on:
       - core_switch
 
@@ -97,10 +88,10 @@ services:
       - NET_ADMIN
     volumes:
       - ./attacks:/attacks
-    command: sh -c "ip route add 10.0.0.0/8 via 172.20.0.2 && tail -f /dev/null"
+    command: sh -c "sleep 5 ; ip route add 10.199.0.0/16 via 10.199.4.10 ; tail -f /dev/null"
     networks:
       wan_network:
-        ipv4_address: 172.20.0.10
+        ipv4_address: 10.199.4.100
 
   telemetry_sniffer:
     build:
@@ -111,16 +102,15 @@ services:
     privileged: true
     restart: unless-stopped
 
-  # --- FIXED: UI Server exposed to host machine mapping ---
   ui_dashboard:
     image: python:3.9-slim
     container_name: ui_dashboard
     ports:
-      - "8501:8501" # Exposed directly out of docker environment for easy access
+      - "8501:8501" 
     volumes:
       - ./dashboard.py:/app/dashboard.py
-    WORKDIR: /app
-    command: sh -c "pip install streamlit websockets pandas modules && streamlit run dashboard.py --server.port=8501 --server.address=0.0.0.0"
+    working_dir: /app
+    command: sh -c "pip install streamlit websockets pandas && streamlit run dashboard.py --server.port=8501 --server.address=0.0.0.0"
     environment:
       - API_URI=ws://host.docker.internal:8000/ws/ui_stream
 
@@ -129,19 +119,19 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/16
+        - subnet: 10.199.4.0/24
   transit_network:
     driver: bridge
     ipam:
       config:
-        - subnet: 10.0.0.0/24
+        - subnet: 10.199.1.0/24
   admin_network:
     driver: bridge
     ipam:
       config:
-        - subnet: 10.0.10.0/24
+        - subnet: 10.199.2.0/24
   guest_network:
     driver: bridge
     ipam:
       config:
-        - subnet: 10.0.20.0/24
+        - subnet: 10.199.3.0/24

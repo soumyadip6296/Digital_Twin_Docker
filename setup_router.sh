@@ -18,8 +18,8 @@ ip link set eth0 up
 ip link set eth1 up
 
 # Add custom network routing targets pointing back to the core switch distributions
-ip route add 10.0.10.0/24 via 10.0.0.2
-ip route add 10.0.20.0/24 via 10.0.0.2
+ip route add 10.199.2.0/24 via 10.199.1.20
+ip route add 10.199.3.0/24 via 10.199.1.20
 
 # Set local configurations
 echo "root:password" | chpasswd
