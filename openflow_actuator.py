@@ -1,19 +1,6 @@
-import paramiko
 import ipaddress
+import subprocess
 
-
-def run_ssh_command(cmd):
-    try:
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(hostname="127.0.0.1", port=2222, username="root", password="password")
-        stdin, stdout, stderr = ssh.exec_command(cmd)
-        error = stderr.read().decode().strip()
-        if error:
-            print(f"⚠️ ACTUATOR ERROR: {error}")
-        ssh.close()
-    except Exception as e:
-        print(f"⚠️ SSH CONNECTION ERROR: {e}")
 
 def is_valid_ip(ip_str):
     try:
@@ -30,8 +17,12 @@ def block_attacker(target_ip):
         return
 
     print(f"🛡️ ACTUATOR: Blocking IP {target_ip} at the Edge Switch!")
-    cmd = f'ovs-ofctl del-flows br0 "ip,nw_src={target_ip}" && ovs-ofctl add-flow br0 "priority=100,ip,nw_src={target_ip},actions=drop"'
-    run_ssh_command(cmd)
+    try:
+        cmd = f'docker exec core_switch sh -c "ovs-ofctl del-flows br-core ip,nw_src={target_ip} && ovs-ofctl add-flow br-core priority=100,ip,nw_src={target_ip},actions=drop"'
+        subprocess.run(cmd, shell=True, check=True)
+        print(f"✅ Successfully blocked {target_ip} via Docker Exec")
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Failed to block attacker: {e}")
 
 
 def unblock_attacker(target_ip):
@@ -40,8 +31,12 @@ def unblock_attacker(target_ip):
         return
 
     print(f"🟢 ACTUATOR: Restoring traffic flow for {target_ip}.")
-    cmd = f'ovs-ofctl del-flows br0 "ip,nw_src={target_ip}"'
-    run_ssh_command(cmd)
+    try:
+        cmd = f'docker exec core_switch sh -c "ovs-ofctl del-flows br-core ip,nw_src={target_ip}"'
+        subprocess.run(cmd, shell=True, check=True)
+        print(f"✅ Successfully unblocked {target_ip}")
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Failed to unblock attacker: {e}")
 
 
 def switch_route(route_id, target_ip="172.20.0.10"):

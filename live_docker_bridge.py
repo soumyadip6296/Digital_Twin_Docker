@@ -5,10 +5,11 @@ import os
 import queue
 import threading
 import time
+from collections import OrderedDict
 from scapy.all import sniff, IP, TCP
 
 # Target API
-URI = "ws://127.0.0.1:8000/ws/network"
+URI = "ws://host.docker.internal:8000/ws/network_state"
 # Sniff on all interfaces by default, or specify via env var
 IFACE = os.getenv("IFACE", None)
 
@@ -25,6 +26,9 @@ MAX_TRACK_SIZE = 5000  # Prevent OOM memory leaks during a SYN flood
 # Our DMZ LAN and OpenWrt Gateway subnets
 SDN_PREFIXES = ("10.0.", "172.20.")
 
+# Flow tracking with max size to prevent OOM
+flows = OrderedDict()
+MAX_FLOWS_SIZE = 5000
 
 def packet_handler(pkt):
     """Callback for Scapy to process packets and calculate real-time
@@ -45,10 +49,42 @@ def packet_handler(pkt):
         protocol = pkt[IP].proto
         reported_ip = src_ip  # Default to the current packet's source
 
+        flow_key = (src_ip, dst_ip)
+        if flow_key not in flows:
+            if len(flows) >= MAX_FLOWS_SIZE:
+                flows.popitem(last=False)
+            flows[flow_key] = {
+                'min_packet_length': float('inf'),
+                'max_packet_length': 0,
+                'syn_count': 0,
+                'ack_count': 0,
+                'fin_count': 0,
+                'rst_count': 0,
+                'psh_count': 0,
+                'urg_count': 0,
+                'last_seen': time.monotonic()
+            }
+        else:
+            # Move to end to mark as recently used
+            flows.move_to_end(flow_key)
+            flows[flow_key]['last_seen'] = time.monotonic()
+
+        current_flow = flows[flow_key]
+        if pkt_len < current_flow['min_packet_length']: current_flow['min_packet_length'] = pkt_len
+        if pkt_len > current_flow['max_packet_length']: current_flow['max_packet_length'] = pkt_len
+
         # --- LIVE TCP RTT / CONGESTION CALCULATION ---
         if TCP in pkt:
             tcp_layer = pkt[TCP]
             current_time = time.monotonic()
+
+            flags = tcp_layer.flags
+            if 'S' in flags: current_flow['syn_count'] += 1
+            if 'A' in flags: current_flow['ack_count'] += 1
+            if 'F' in flags: current_flow['fin_count'] += 1
+            if 'R' in flags: current_flow['rst_count'] += 1
+            if 'P' in flags: current_flow['psh_count'] += 1
+            if 'U' in flags: current_flow['urg_count'] += 1
 
             global last_cleanup_time
             # TTL Cleanup: Every 10 seconds, remove packets waiting for an ACK for over 3 seconds
@@ -59,6 +95,15 @@ def packet_handler(pkt):
                 ]
                 for k in stale_keys:
                     del expected_acks[k]
+
+                # Cleanup stale flows as well (older than 60 seconds)
+                stale_flows = [
+                    fk for fk, fv in flows.items()
+                    if current_time - fv['last_seen'] > 60.0
+                ]
+                for fk in stale_flows:
+                    del flows[fk]
+
                 last_cleanup_time = current_time
 
             # 1. Process ACKs
@@ -111,7 +156,15 @@ def packet_handler(pkt):
             "lat_a": round(ema_latency, 4),
             "lat_b": 0.05,
             # Uses tracked attacker IP if this is a turnaround ACK
-            "src_ip": reported_ip
+            "src_ip": reported_ip,
+            "min_packet_length": current_flow['min_packet_length'],
+            "max_packet_length": current_flow['max_packet_length'],
+            "syn_count": current_flow['syn_count'],
+            "ack_count": current_flow['ack_count'],
+            "fin_count": current_flow['fin_count'],
+            "rst_count": current_flow['rst_count'],
+            "psh_count": current_flow['psh_count'],
+            "urg_count": current_flow['urg_count']
         }
         try:
             packet_queue.put_nowait(payload)
