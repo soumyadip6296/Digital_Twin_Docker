@@ -80,6 +80,15 @@ services:
       wan_network:
         ipv4_address: 172.20.0.10
 
+  telemetry_sniffer:
+    build:
+      context: .
+      dockerfile: Dockerfile.sniffer
+    container_name: telemetry_sniffer
+    network_mode: host
+    privileged: true
+    restart: unless-stopped
+
 networks:
   wan_network:
     driver: bridge
@@ -104,3 +113,5 @@ networks:
       config:
         - subnet: 10.0.20.0/24
           gateway: 10.0.20.254
+
+  
