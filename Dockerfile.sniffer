@@ -1,6 +1,6 @@
 FROM python:3.9-slim
 WORKDIR /app
-RUN apt-get update && apt-get install -y tcpdump iproute2
+RUN apt-get update && apt-get install -y tcpdump iproute2 libpcap-dev gcc && rm -rf /var/lib/apt/lists/*
 RUN pip install scapy websockets
 COPY live_docker_bridge.py .
 CMD ["python", "-u", "live_docker_bridge.py"]

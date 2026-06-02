@@ -5,7 +5,7 @@ import os
 import queue
 import threading
 import time
-from scapy.all import sniff, IP, TCP
+from scapy.all import sniff, IP, TCP, ARP, Ether
 
 # --- UPDATED: Docker-to-Windows API Routing ---
 # Uses host.docker.internal to bypass the WSL boundary
@@ -22,18 +22,39 @@ last_cleanup_time = time.monotonic()
 MAX_TRACK_SIZE = 5000
 SDN_PREFIXES = ("10.0.", "172.20.")
 
-# --- NEW: Flow Feature Extraction Tracker ---
+# --- NEW: Feature & Topology Trackers ---
 flow_stats = {}
 MAX_FLOWS = 1000  # Prevent memory leaks
 
-def packet_handler(pkt):
-    global ema_latency, last_cleanup_time, flow_stats
+discovered_nodes = {}  # Format: { "IP": {"mac": "...", "last_seen": timestamp} }
 
+def packet_handler(pkt):
+    global ema_latency, last_cleanup_time, flow_stats, discovered_nodes
+
+    current_time = time.monotonic()
+
+    # --- TOPOLOGY DISCOVERY: ARP TRACKING ---
+    # Catch ARP Broadcasts (New nodes announcing themselves) - Layer 2
+    if ARP in pkt and pkt[ARP].op in (1, 2):  # 1 = who-has, 2 = is-at
+        node_ip = pkt[ARP].psrc
+        node_mac = pkt[ARP].hwsrc
+        if node_ip.startswith(SDN_PREFIXES):
+            discovered_nodes[node_ip] = {"mac": node_mac, "last_seen": current_time}
+        return  # ARP packets have no IP/TCP payload to process below
+
+    # If it's not an IP packet, drop it
     if IP not in pkt:
         return
 
     src_ip = pkt[IP].src
     dst_ip = pkt[IP].dst
+
+    # --- TOPOLOGY DISCOVERY: ETHERNET MAC TRACKING ---
+    # Catch MACs from standard IP traffic
+    if Ether in pkt:
+        src_mac = pkt[Ether].src
+        if src_ip.startswith(SDN_PREFIXES):
+            discovered_nodes[src_ip] = {"mac": src_mac, "last_seen": current_time}
 
     # Keep tracking scoped to the SDN topology
     if not (src_ip.startswith(SDN_PREFIXES) or dst_ip.startswith(SDN_PREFIXES)):
@@ -42,7 +63,7 @@ def packet_handler(pkt):
     pkt_len = len(pkt)
     reported_ip = src_ip  
 
-    # --- NEW: Extract and Track Packet & Flag Features ---
+    # --- Extract and Track Packet & Flag Features ---
     if src_ip not in flow_stats:
         if len(flow_stats) >= MAX_FLOWS:
             flow_stats.pop(next(iter(flow_stats))) # Remove oldest flow
@@ -65,7 +86,6 @@ def packet_handler(pkt):
     # --- LIVE TCP RTT & CONGESTION CALCULATION ---
     if TCP in pkt:
         tcp_layer = pkt[TCP]
-        current_time = time.monotonic()
         flags = tcp_layer.flags
 
         # Extract TCP Flags for the Legacy ISCX Models
@@ -136,7 +156,10 @@ def packet_handler(pkt):
         "fin_count": float(stats['fin_count']),
         "rst_count": float(stats['rst_count']),
         "psh_count": float(stats['psh_count']),
-        "urg_count": float(stats['urg_count'])
+        "urg_count": float(stats['urg_count']),
+
+        # --- NEW: Attach Topology State ---
+        "topology_nodes": discovered_nodes
     }
     
     try:
@@ -148,7 +171,8 @@ def packet_handler(pkt):
 def run_sniffer():
     iface_str = IFACE if IFACE else 'ALL'
     print(f"🕵️  Starting live packet sniffer on interface: {iface_str}")
-    sniff(iface=IFACE, filter="ip", prn=packet_handler, store=False)
+    # filter="ip or arp" ensures we catch Layer 2 ARP broadcasts along with Layer 3 IP
+    sniff(iface=IFACE, filter="ip or arp", prn=packet_handler, store=False)
 
 
 async def stream_to_api():
@@ -156,7 +180,7 @@ async def stream_to_api():
         try:
             print(f"🔗 Connecting to AI API at {URI} ...")
             async with websockets.connect(URI) as websocket:
-                print("✅ Connected! Streaming live enriched packets...")
+                print("✅ Connected! Streaming live enriched packets + topology...")
                 while True:
                     if not packet_queue.empty():
                         payload = packet_queue.get()
