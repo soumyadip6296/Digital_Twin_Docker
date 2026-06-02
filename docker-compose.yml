@@ -1,0 +1,106 @@
+version: '3.8'
+
+services:
+  sdn_router:
+    build:
+      context: .
+      dockerfile: Dockerfile.router
+    container_name: sdn_router
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "8080:80"
+      - "2222:22"
+    volumes:
+      - ./setup_router.sh:/setup_router.sh
+    networks:
+      wan_network:
+        ipv4_address: 172.20.0.2
+      transit_network:
+        ipv4_address: 10.0.0.1
+
+  core_switch:
+    image: alpine:latest
+    container_name: core_switch
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+    command: >
+      sh -c "
+        apk add --no-cache openvswitch iproute2 &&
+        sysctl -w net.ipv4.ip_forward=1 &&
+        export OVS_USERSPACE_ONLY=1 &&
+        /usr/share/openvswitch/scripts/ovs-ctl start &&
+        ovs-vsctl --may-exist add-br br-core -- set bridge br-core datapath_type=netdev &&
+        ip route replace default via 10.0.0.1 &&
+        sleep infinity
+      "
+    networks:
+      transit_network:
+        ipv4_address: 10.0.0.2
+      admin_network:
+        ipv4_address: 10.0.10.1
+      guest_network:
+        ipv4_address: 10.0.20.1
+
+  admin_web_server:
+    image: nginx:alpine
+    container_name: admin_web_server
+    cap_add:
+      - NET_ADMIN
+    command: sh -c "ip route replace default via 10.0.10.1 && nginx -g 'daemon off;'"
+    networks:
+      admin_network:
+        ipv4_address: 10.0.10.100
+    depends_on:
+      - core_switch
+
+  guest_api_server:
+    image: python:alpine
+    container_name: guest_api_server
+    cap_add:
+      - NET_ADMIN
+    command: sh -c "ip route replace default via 10.0.20.1 && echo 'Guest API Running' > index.html && python -m http.server 3000"
+    networks:
+      guest_network:
+        ipv4_address: 10.0.20.101
+    depends_on:
+      - core_switch
+
+  external_client:
+    image: python:alpine
+    container_name: external_client
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./attacks:/attacks
+    command: sh -c "ip route add 10.0.0.0/8 via 172.20.0.2 && tail -f /dev/null"
+    networks:
+      wan_network:
+        ipv4_address: 172.20.0.10
+
+networks:
+  wan_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+  transit_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.0.0/24
+          gateway: 10.0.0.254
+  admin_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.10.0/24
+          gateway: 10.0.10.254
+  guest_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.20.0/24
+          gateway: 10.0.20.254

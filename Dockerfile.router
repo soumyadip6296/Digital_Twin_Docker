@@ -1,0 +1,9 @@
+FROM alpine:latest
+
+RUN apk add --no-cache openvswitch iproute2 dropbear
+RUN echo "root:password" | chpasswd
+COPY setup_router.sh /setup_router.sh
+RUN chmod +x /setup_router.sh
+
+# Keys are generated inside setup_router.sh, just run the server
+CMD ["/bin/sh", "-c", "/setup_router.sh && exec dropbear -F -E -p 22"]
