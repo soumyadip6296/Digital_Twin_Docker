@@ -11,7 +11,6 @@ def is_valid_ip(ip_str):
 
 
 def block_attacker(target_ip):
-    """Injects an OpenFlow rule to drop all traffic from the target IP."""
     if not is_valid_ip(target_ip):
         print(f"⚠️ ACTUATOR ERROR: Invalid IP address: {target_ip}")
         return
@@ -26,7 +25,6 @@ def block_attacker(target_ip):
 
 
 def unblock_attacker(target_ip):
-    """Removes the drop rule to restore normal traffic."""
     if not is_valid_ip(target_ip):
         return
 
@@ -39,7 +37,7 @@ def unblock_attacker(target_ip):
         print(f"❌ Failed to unblock attacker: {e}")
 
 
-def switch_route(route_id, target_ip="172.20.0.10"):
+def switch_route(route_id, target_ip):
     """Adapter function mapping the AI routing decision to firewall rules."""
     if route_id == 1:
         block_attacker(target_ip)
