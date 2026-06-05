@@ -1,5 +1,5 @@
-import subprocess
 import ipaddress
+import subprocess
 
 
 def is_valid_ip(ip_str):
@@ -16,8 +16,8 @@ def block_attacker(target_ip):
         return
 
     print(f"🛡️ ACTUATOR: Blocking IP {target_ip} at the Edge Switch!")
-    cmd = f'docker exec core_switch sh -c "ovs-ofctl del-flows br-core ip,nw_src={target_ip} && ovs-ofctl add-flow br-core priority=100,ip,nw_src={target_ip},actions=drop"'
     try:
+        cmd = f'docker exec core_switch sh -c "ovs-ofctl del-flows br-core ip,nw_src={target_ip} && ovs-ofctl add-flow br-core priority=100,ip,nw_src={target_ip},actions=drop"'
         subprocess.run(cmd, shell=True, check=True)
         print(f"✅ Successfully blocked {target_ip} via Docker Exec")
     except subprocess.CalledProcessError as e:
@@ -29,8 +29,8 @@ def unblock_attacker(target_ip):
         return
 
     print(f"🟢 ACTUATOR: Restoring traffic flow for {target_ip}.")
-    cmd = f'docker exec core_switch sh -c "ovs-ofctl del-flows br-core ip,nw_src={target_ip}"'
     try:
+        cmd = f'docker exec core_switch sh -c "ovs-ofctl del-flows br-core ip,nw_src={target_ip}"'
         subprocess.run(cmd, shell=True, check=True)
         print(f"✅ Successfully unblocked {target_ip}")
     except subprocess.CalledProcessError as e:

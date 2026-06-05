@@ -119,8 +119,3 @@ networks:
     ipam:
       config:
         - subnet: 10.199.1.0/24
-  admin_network:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 10.199.2.0/24
