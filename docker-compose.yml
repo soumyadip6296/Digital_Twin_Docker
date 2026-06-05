@@ -12,74 +12,85 @@ services:
     working_dir: /app
     command: sh -c "pip install -r requirements.txt && uvicorn core_api:app --host 0.0.0.0 --port 8000"
 
-  sdn_router:
-    image: alpine:latest
-    container_name: sdn_router
+  wan_router:
+    build:
+      context: .
+      dockerfile: Dockerfile.router
+    container_name: wan_router
     privileged: true
     cap_add:
       - NET_ADMIN
-    command: >
-      sh -c "
-        apk add --no-cache iptables iproute2 &&
-        sysctl -w net.ipv4.ip_forward=1 &&
-        iptables -P FORWARD ACCEPT &&
-        ip route add 10.199.2.0/24 via 10.199.1.20 &&
-        sleep infinity
-      "
+      - SYS_ADMIN
     networks:
-      wan_network:
-        ipv4_address: 10.199.4.10
-      transit_network:
-        ipv4_address: 10.199.1.10
+      wan_net:
+        ipv4_address: 172.20.0.10
+      lan1_net:
+        ipv4_address: 10.199.2.10
+      lan2_net:
+        ipv4_address: 10.199.3.10
+    ports:
+      - "2222:22" # External SSH
+    command: /setup_router.sh
 
-  core_switch:
+  lan_switch1:
     image: alpine:latest
-    container_name: core_switch
+    container_name: lan_switch1
     privileged: true
     cap_add:
       - NET_ADMIN
     command: >
       sh -c "
         apk add --no-cache openvswitch iproute2 iptables &&
-        sysctl -w net.ipv4.ip_forward=1 &&
-        iptables -P FORWARD ACCEPT &&
         /usr/share/openvswitch/scripts/ovs-ctl start &&
-        ovs-vsctl --may-exist add-br br-core -- set bridge br-core datapath_type=netdev &&
-        ovs-vsctl --may-exist add-port br-core eth0 &&
-        ovs-vsctl --may-exist add-port br-core eth1 &&
-        ip addr flush dev eth0 &&
-        ip addr flush dev eth1 &&
-        ip addr add 10.199.1.20/24 dev br-core &&
-        ip addr add 10.199.2.20/24 dev br-core &&
-        ip link set br-core up &&
-        ovs-ofctl add-flow br-core \"priority=0,actions=NORMAL\" &&
+        ovs-vsctl --may-exist add-br br-lan1 -- set bridge br-lan1 datapath_type=netdev &&
+        ovs-ofctl add-flow br-lan1 \"priority=0,actions=NORMAL\" &&
         sleep infinity
       "
     networks:
-      transit_network:
-        ipv4_address: 10.199.1.20
-      admin_network:
+      lan1_net:
         ipv4_address: 10.199.2.20
 
-  admin_web_server:
-    image: nginx:alpine
-    container_name: admin_web_server
+  lan_switch2:
+    image: alpine:latest
+    container_name: lan_switch2
+    privileged: true
     cap_add:
       - NET_ADMIN
-    command: sh -c "sleep 3 && ip route del default || true && ip route add default via 10.199.2.20 && nginx -g 'daemon off;'"
+    command: >
+      sh -c "
+        apk add --no-cache openvswitch iproute2 iptables &&
+        /usr/share/openvswitch/scripts/ovs-ctl start &&
+        ovs-vsctl --may-exist add-br br-lan2 -- set bridge br-lan2 datapath_type=netdev &&
+        ovs-ofctl add-flow br-lan2 \"priority=0,actions=NORMAL\" &&
+        sleep infinity
+      "
     networks:
-      admin_network:
-        ipv4_address: 10.199.2.100
+      lan2_net:
+        ipv4_address: 10.199.3.20
 
-  external_client:
-    image: python:alpine
-    container_name: external_client
+  lightweight_server1:
+    image: nginx:alpine
+    container_name: server1
     cap_add:
       - NET_ADMIN
-    command: sh -c "sleep 3 && ip route del default || true && ip route add 10.199.0.0/16 via 10.199.4.10 && tail -f /dev/null"
     networks:
-      wan_network:
-        ipv4_address: 10.199.4.100
+      lan1_net:
+        ipv4_address: 10.199.2.100
+    ports:
+      - "8081:80"
+    command: sh -c "ip route del default || true && ip route add default via 10.199.2.10 && nginx -g 'daemon off;'"
+
+  lightweight_server2:
+    image: python:alpine
+    container_name: server2
+    cap_add:
+      - NET_ADMIN
+    networks:
+      lan2_net:
+        ipv4_address: 10.199.3.100
+    ports:
+      - "8082:80"
+    command: sh -c "ip route del default || true && ip route add default via 10.199.3.10 && echo 'Server 2 OK' > index.html && python -m http.server 80"
 
   telemetry_sniffer:
     build:
@@ -91,6 +102,7 @@ services:
     restart: unless-stopped
     environment:
       - API_URI=ws://127.0.0.1:8000/ws/network_state
+      - IFACE=any
     depends_on:
       - core_api
 
@@ -109,13 +121,18 @@ services:
       - core_api
 
 networks:
-  wan_network:
+  wan_net:
     driver: bridge
     ipam:
       config:
-        - subnet: 10.199.4.0/24
-  transit_network:
+        - subnet: 172.20.0.0/24
+  lan1_net:
     driver: bridge
     ipam:
       config:
-        - subnet: 10.199.1.0/24
+        - subnet: 10.199.2.0/24
+  lan2_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.199.3.0/24
