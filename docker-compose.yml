@@ -2,15 +2,24 @@ version: '3.8'
 
 services:
   core_api:
-    image: python:3.12-slim
+    build:
+      context: .
+      dockerfile: Dockerfile.api
     container_name: core_api
     ports:
       - "8000:8000"
     volumes:
-      - .:/app
+      - ./models:/app/models
       - /var/run/docker.sock:/var/run/docker.sock
-    working_dir: /app
-    command: sh -c "pip install -r requirements.txt && uvicorn core_api:app --host 0.0.0.0 --port 8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - ai_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/state"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
   wan_router:
     build:
@@ -29,7 +38,7 @@ services:
       lan2_net:
         ipv4_address: 10.199.3.10
     ports:
-      - "2222:22" # External SSH
+      - "2222:22"
     command: /setup_router.sh
 
   lan_switch1:
@@ -90,7 +99,7 @@ services:
         ipv4_address: 10.199.3.100
     ports:
       - "8082:80"
-    command: sh -c "ip route del default || true && ip route add default via 10.199.3.10 && echo 'Server 2 OK' > index.html && python -m http.server 80"
+    command: sh -c "ip route del default || true && ip route add default via 10.199.3.10 && echo 'Server 2 OK' > /tmp/index.html && cd /tmp && python -m http.server 80"
 
   telemetry_sniffer:
     build:
@@ -103,24 +112,32 @@ services:
     environment:
       - API_URI=ws://127.0.0.1:8000/ws/network_state
       - IFACE=any
+      - PYTHONUNBUFFERED=1
     depends_on:
-      - core_api
+      core_api:
+        condition: service_healthy
 
   ui_dashboard:
-    image: python:3.12-slim
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
     container_name: ui_dashboard
     ports:
-      - "8501:8501" 
+      - "8501:8501"
     volumes:
       - ./dashboard.py:/app/dashboard.py
-    working_dir: /app
-    command: sh -c "pip install streamlit requests pandas && streamlit run dashboard.py --server.port=8501 --server.address=0.0.0.0"
     environment:
       - API_URI=http://core_api:8000/api/state
+      - PYTHONUNBUFFERED=1
+    networks:
+      - ai_net
     depends_on:
-      - core_api
+      core_api:
+        condition: service_healthy
 
 networks:
+  ai_net:
+    driver: bridge
   wan_net:
     driver: bridge
     ipam:

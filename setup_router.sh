@@ -14,13 +14,13 @@ iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 # Set local configurations for SSH
 echo "root:password" | chpasswd
 
+# Generate SSH keys if they don't exist
 mkdir -p /etc/dropbear
-dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key 2>/dev/null
-dropbearkey -t ecdsa -f /etc/dropbear/dropbear_ecdsa_host_key 2>/dev/null
-dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key 2>/dev/null
-
-# Start SSH daemon service
-dropbear -R -E -p 22
+[ ! -f /etc/dropbear/dropbear_rsa_host_key ] && dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key
+[ ! -f /etc/dropbear/dropbear_ecdsa_host_key ] && dropbearkey -t ecdsa -f /etc/dropbear/dropbear_ecdsa_host_key
+[ ! -f /etc/dropbear/dropbear_ed25519_host_key ] && dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key
 
 echo "✅ Multi-Tier WAN Router configuration completed successfully."
-tail -f /dev/null
+
+# Start SSH daemon in foreground (do not background)
+exec dropbear -F -E -p 22
