@@ -5,6 +5,7 @@ import os
 import queue
 import threading
 import time
+from collections import OrderedDict
 from scapy.all import sniff, IP, TCP, ARP, Ether
 
 URI = os.getenv("API_URI", "ws://host.docker.internal:8000/ws/network_state")
@@ -20,48 +21,145 @@ MAX_TRACK_SIZE = 5000
 # FIX: Matched to the docker-compose subnets
 SDN_PREFIXES = ("10.199.", "172.20.")
 
-flow_stats = {}
-MAX_FLOWS = 1000  
-discovered_nodes = {}
+# Flow tracking with max size to prevent OOM
+flows = OrderedDict()
+MAX_FLOWS_SIZE = 5000
 
 def packet_handler(pkt):
-    global ema_latency, last_cleanup_time, flow_stats, discovered_nodes
-    current_time = time.monotonic()
+    """Callback for Scapy to process packets and calculate real-time
+    TCP RTT & Congestion.
+    """
+    global ema_latency
 
-    if ARP in pkt and pkt[ARP].op in (1, 2): 
-        node_ip = pkt[ARP].psrc
-        node_mac = pkt[ARP].hwsrc
-        if node_ip.startswith(SDN_PREFIXES):
-            discovered_nodes[node_ip] = {"mac": node_mac, "last_seen": current_time}
-        return  
+    if IP in pkt:
+        src_ip = pkt[IP].src
+        dst_ip = pkt[IP].dst
 
-    if IP not in pkt:
-        return
+        # FIX: Keep tracking scoped to the SDN topology to avoid host noise
+        if not (src_ip.startswith(SDN_PREFIXES) or
+                dst_ip.startswith(SDN_PREFIXES)):
+            return
 
-    src_ip = pkt[IP].src
-    dst_ip = pkt[IP].dst
+        pkt_len = len(pkt)
+        protocol = pkt[IP].proto
+        reported_ip = src_ip  # Default to the current packet's source
 
-    if Ether in pkt:
-        src_mac = pkt[Ether].src
-        if src_ip.startswith(SDN_PREFIXES):
-            discovered_nodes[src_ip] = {"mac": src_mac, "last_seen": current_time}
+        flow_key = (src_ip, dst_ip)
+        if flow_key not in flows:
+            if len(flows) >= MAX_FLOWS_SIZE:
+                flows.popitem(last=False)
+            flows[flow_key] = {
+                'min_packet_length': float('inf'),
+                'max_packet_length': 0,
+                'syn_count': 0,
+                'ack_count': 0,
+                'fin_count': 0,
+                'rst_count': 0,
+                'psh_count': 0,
+                'urg_count': 0,
+                'last_seen': time.monotonic()
+            }
+        else:
+            # Move to end to mark as recently used
+            flows.move_to_end(flow_key)
+            flows[flow_key]['last_seen'] = time.monotonic()
 
-    if not (src_ip.startswith(SDN_PREFIXES) or dst_ip.startswith(SDN_PREFIXES)):
-        return
+        current_flow = flows[flow_key]
+        if pkt_len < current_flow['min_packet_length']: current_flow['min_packet_length'] = pkt_len
+        if pkt_len > current_flow['max_packet_length']: current_flow['max_packet_length'] = pkt_len
 
-    pkt_len = len(pkt)
-    reported_ip = src_ip  
+        # --- LIVE TCP RTT / CONGESTION CALCULATION ---
+        if TCP in pkt:
+            tcp_layer = pkt[TCP]
+            current_time = time.monotonic()
 
-    if src_ip not in flow_stats:
-        if len(flow_stats) >= MAX_FLOWS:
-            flow_stats.pop(next(iter(flow_stats))) 
-            
-        flow_stats[src_ip] = {
-            'min_packet_length': pkt_len,
-            'max_packet_length': pkt_len,
-            'syn_count': 0, 'ack_count': 0, 'fin_count': 0,
-            'rst_count': 0, 'psh_count': 0, 'urg_count': 0,
-            'total_bytes': 0, 'packet_count': 0
+            flags = tcp_layer.flags
+            if 'S' in flags: current_flow['syn_count'] += 1
+            if 'A' in flags: current_flow['ack_count'] += 1
+            if 'F' in flags: current_flow['fin_count'] += 1
+            if 'R' in flags: current_flow['rst_count'] += 1
+            if 'P' in flags: current_flow['psh_count'] += 1
+            if 'U' in flags: current_flow['urg_count'] += 1
+
+            global last_cleanup_time
+            # TTL Cleanup: Every 10 seconds, remove packets waiting for an ACK for over 3 seconds
+            if current_time - last_cleanup_time > 10.0:
+                stale_keys = [
+                    k for k, v in expected_acks.items()
+                    if (current_time - (v[0] if isinstance(v, tuple) else v)) > 3.0
+                ]
+                for k in stale_keys:
+                    del expected_acks[k]
+
+                # Cleanup stale flows as well (older than 60 seconds)
+                stale_flows = [
+                    fk for fk, fv in flows.items()
+                    if current_time - fv['last_seen'] > 60.0
+                ]
+                for fk in stale_flows:
+                    del flows[fk]
+
+                last_cleanup_time = current_time
+
+            # 1. Process ACKs
+            is_ack = bool(tcp_layer.flags & 0x10)
+            if is_ack:
+                ack_key = (src_ip, dst_ip, tcp_layer.sport,
+                           tcp_layer.dport, tcp_layer.ack)
+                tracked_ack = expected_acks.pop(ack_key, None)
+
+                if tracked_ack is not None:
+                    sent_time, original_src = tracked_ack
+                    rtt = current_time - sent_time
+                    rtt = min(rtt, 2.0)
+                    ema_latency = (0.8 * ema_latency) + (0.2 * rtt)
+                    # FIX: Prevent blocking our own protected servers and
+                    # gateway. If the original packet came from our SDN,
+                    # the attacker
+                    # is the current ACKer.
+                    if original_src.startswith(SDN_PREFIXES):
+                        reported_ip = src_ip
+                    else:
+                        reported_ip = original_src
+
+            # 2. Track any packet requiring an ACK (payload or SYN flag)
+            payload_len = len(tcp_layer.payload)
+            is_syn = bool(tcp_layer.flags & 0x02)
+
+            if payload_len > 0 or is_syn:
+                # FIX: Correct TCP sequence math for SYN + Payload
+                # (TCP Fast Open)
+                seq_next = (tcp_layer.seq + payload_len + (1 if is_syn else 0))
+                track_key = (dst_ip, src_ip, tcp_layer.dport,
+                             tcp_layer.sport, seq_next)
+
+                if len(expected_acks) >= MAX_TRACK_SIZE:
+                    expected_acks.pop(next(iter(expected_acks)))
+                # FIX: Store both the timestamp AND the sender's IP
+                expected_acks[track_key] = (current_time, src_ip)
+
+        # --- BUILD AI PAYLOAD ---
+        features = [0.0] * 40
+        features[0] = float(protocol)
+        features[1] = float(pkt_len)
+
+        payload = {
+            "features": features,
+            "volume": float(pkt_len),
+            "ground_truth_attack": False,
+            # 🔴 LIVE PHYSICAL LATENCY (Network + Buffer Bloat)
+            "lat_a": round(ema_latency, 4),
+            "lat_b": 0.05,
+            # Uses tracked attacker IP if this is a turnaround ACK
+            "src_ip": reported_ip,
+            "min_packet_length": current_flow['min_packet_length'],
+            "max_packet_length": current_flow['max_packet_length'],
+            "syn_count": current_flow['syn_count'],
+            "ack_count": current_flow['ack_count'],
+            "fin_count": current_flow['fin_count'],
+            "rst_count": current_flow['rst_count'],
+            "psh_count": current_flow['psh_count'],
+            "urg_count": current_flow['urg_count']
         }
 
     stats = flow_stats[src_ip]
