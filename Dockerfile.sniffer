@@ -1,6 +1,14 @@
-FROM python:3.9-slim
+FROM python:3.14-slim
+
 WORKDIR /app
-RUN apt-get update && apt-get install -y tcpdump iproute2 libpcap-dev gcc && rm -rf /var/lib/apt/lists/*
-RUN pip install scapy websockets
+
+RUN apt-get update && apt-get install -y tcpdump iproute2 libpcap-dev gcc && rm -rf /var/lib/apt/lists/* && \
+    python -m venv /app/.venv && \
+    /app/.venv/bin/pip install --no-cache-dir scapy websockets
+
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH=/app/.venv/bin:$PATH
+
 COPY live_docker_bridge.py .
+
 CMD ["python", "-u", "live_docker_bridge.py"]

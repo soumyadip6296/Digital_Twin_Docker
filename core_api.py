@@ -76,49 +76,30 @@ def ensure_models_exist():
         return obs_scaler, prophet_scaler, analyst_scaler, analyst_model, cluster_map, raw_threshold, observer, prophet, manager
     
     except Exception as e:
-        print(f"⚠️ Model files not found. Creating mock models for demo: {e}")
+        print(f"⚠️ Model files missing or corrupted: {e}. Creating mock models...")
         from sklearn.preprocessing import StandardScaler
         from sklearn.cluster import KMeans
         
-        # Create dummy scalers
         obs_scaler = StandardScaler()
         obs_scaler.fit(np.zeros((100, 40)))
-        joblib.dump(obs_scaler, f"{MDL}/observer_scaler.pkl")
         
         prophet_scaler = StandardScaler()
         prophet_scaler.fit(np.zeros((100, 1)))
-        joblib.dump(prophet_scaler, f"{MDL}/prophet_scaler.pkl")
         
         analyst_scaler = StandardScaler()
         analyst_scaler.fit(np.zeros((100, 40)))
-        joblib.dump(analyst_scaler, f"{MDL}/analyst_scaler.pkl")
         
-        # Dummy analyst model
         analyst_model = KMeans(n_clusters=3)
         analyst_model.fit(np.random.randn(100, 40))
-        joblib.dump(analyst_model, f"{MDL}/analyst_model.pkl")
         
-        # Dummy cluster map
         cluster_map = {"0": "Normal", "1": "Video/Heavy", "2": "Attack"}
-        with open(f"{MDL}/analyst_cluster_map.json", "w") as f:
-            json.dump(cluster_map, f)
-        
-        # Dummy threshold
         raw_threshold = np.array([0.5, 0.6, 0.7, 0.8])
-        joblib.dump(raw_threshold, f"{MDL}/observer_threshold.pkl")
         
-        # Create dummy observer model
         observer = RobustLSTMAutoencoder().to(device)
-        torch.save(observer.state_dict(), f"{MDL}/observer_model.pth")
-        
-        # Create dummy prophet model
         prophet = RobustTrafficForecaster().to(device)
-        torch.save(prophet.state_dict(), f"{MDL}/prophet_model.pth")
         
-        # Create dummy RL manager (PPO)
-        from stable_baselines3 import PPO
+        # PPO is already imported at the top of the file, so we just call it here:
         manager = PPO("MlpPolicy", "CartPole-v1", verbose=0)
-        manager.save(f"{MDL}/manager_model")
         
         print("✅ Demo Models Created Successfully!")
         return obs_scaler, prophet_scaler, analyst_scaler, analyst_model, cluster_map, raw_threshold, observer, prophet, manager

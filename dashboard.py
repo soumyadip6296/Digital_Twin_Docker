@@ -54,18 +54,36 @@ else:
     st.subheader("🗺️ Auto-Discovered Network Map")
     topology = state.get("topology", {})
 
+    # --- THE ANNOTATION DICTIONARY ---
+    KNOWN_NODES = {
+        "172.20.0.10": "🌐 WAN Router",
+        "172.20.0.50": "💀 External Attacker",
+        "10.199.2.10": "🔀 LAN 1 Gateway",
+        "10.199.2.20": "🔌 LAN Switch 1",
+        "10.199.2.100": "🖥️ Web Server 1 (Nginx)",
+        "10.199.3.10": "🔀 LAN 2 Gateway",
+        "10.199.3.20": "🔌 LAN Switch 2",
+        "10.199.3.100": "🖥️ Web Server 2 (Python)"
+    }
+
     if topology:
         topo_data = []
         for ip, data in topology.items():
+            # Automatically annotate the role based on the dictionary
+            node_role = KNOWN_NODES.get(ip, "❓ Unknown Node")
+            
             topo_data.append({
+                "Device Role": node_role,
                 "Node IP Address": ip,
                 "Hardware MAC Address": data.get("mac", "Unknown"),
                 "Last Seen (Monotonic)": round(data.get("last_seen", 0), 2)
             })
+        
+        # Upgraded to an interactive dataframe instead of a static table
         df = pd.DataFrame(topo_data)
-        st.table(df)
+        st.dataframe(df, use_container_width=True)
     else:
-        st.info("📡 Scanning network... Waiting for ARP broadcasts to discover nodes.")
+        st.info("📡 Scanning network... Waiting for traffic to discover nodes.")
 
 # Manual refresh button
 col_refresh = st.columns([1, 10])

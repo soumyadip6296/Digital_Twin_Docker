@@ -9,7 +9,8 @@ from collections import OrderedDict
 from scapy.all import sniff, IP, TCP, ARP, Ether
 
 URI = os.getenv("API_URI", "ws://127.0.0.1:8000/ws/network_state")
-IFACE = os.getenv("IFACE", None)
+IFACE = None
+#IFACE = os.getenv("IFACE", None)
 maxsize = int(os.getenv("PACKET_QUEUE_MAXSIZE", "10000"))
 packet_queue = queue.Queue(maxsize=maxsize)
 

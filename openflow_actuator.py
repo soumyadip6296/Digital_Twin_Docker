@@ -1,48 +1,30 @@
-import ipaddress
-import subprocess
+import docker
+import time
 
-# Define the new multi-switch topology
-SWITCHES = [
-    {"container": "lan_switch1", "bridge": "br-lan1"},
-    {"container": "lan_switch2", "bridge": "br-lan2"}
-]
-
-def is_valid_ip(ip_str):
+def switch_route(action_type, target_ip):
+    """
+    Connects to the virtual WAN router via Docker socket and injects iptables firewall rules.
+    """
     try:
-        ipaddress.ip_address(ip_str)
-        return True
-    except ValueError:
-        return False
-
-def block_attacker(target_ip):
-    if not is_valid_ip(target_ip):
-        print(f"⚠️ ACTUATOR ERROR: Invalid IP address: {target_ip}")
-        return
-
-    print(f"🛡️ ACTUATOR: Distributing block for IP {target_ip} across edge switches!")
-    for switch in SWITCHES:
-        try:
-            cmd = f'docker exec {switch["container"]} sh -c "ovs-ofctl del-flows {switch["bridge"]} ip,nw_src={target_ip} && ovs-ofctl add-flow {switch["bridge"]} priority=100,ip,nw_src={target_ip},actions=drop"'
-            subprocess.run(cmd, shell=True, check=True)
-            print(f"✅ Successfully blocked {target_ip} on {switch['container']}")
-        except subprocess.CalledProcessError as e:
-            print(f"❌ Failed to block attacker on {switch['container']}: {e}")
-
-def unblock_attacker(target_ip):
-    if not is_valid_ip(target_ip):
-        return
-
-    print(f"🟢 ACTUATOR: Restoring traffic flow for {target_ip}.")
-    for switch in SWITCHES:
-        try:
-            cmd = f'docker exec {switch["container"]} sh -c "ovs-ofctl del-flows {switch["bridge"]} ip,nw_src={target_ip}"'
-            subprocess.run(cmd, shell=True, check=True)
-            print(f"✅ Successfully unblocked {target_ip} on {switch['container']}")
-        except subprocess.CalledProcessError as e:
-            print(f"❌ Failed to unblock attacker on {switch['container']}: {e}")
-
-def switch_route(route_id, target_ip):
-    if route_id == 1:
-        block_attacker(target_ip)
-    else:
-        unblock_attacker(target_ip)
+        # Connect to the local Docker daemon
+        client = docker.from_env()
+        router = client.containers.get("wan_router")
+        
+        if action_type == 1:
+            print(f"🧱 [FIREWALL] Executing BLOCK rule for IP: {target_ip}")
+            # Insert a rule at the top of the FORWARD chain to drop all packets from this IP
+            block_cmd = f"sh -c 'iptables -I FORWARD -s {target_ip} -j DROP'"
+            router.exec_run(block_cmd)
+            
+        elif action_type == 0:
+            print(f"🟢 [FIREWALL] Executing ALLOW rule for IP: {target_ip}")
+            # Delete the drop rule from the FORWARD chain (Auto-Heal)
+            allow_cmd = f"sh -c 'iptables -D FORWARD -s {target_ip} -j DROP'"
+            router.exec_run(allow_cmd)
+            
+        elif action_type == 2:
+            print(f"🔀 [ROUTER] Diverting traffic from {target_ip} to backup node.")
+            # Placeholder for load balancing logic
+            
+    except Exception as e:
+        print(f"⚠️ [ACTUATOR ERROR] Failed to communicate with router: {e}")

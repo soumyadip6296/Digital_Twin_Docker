@@ -1,6 +1,7 @@
 FROM alpine:latest
 
-RUN apk add --no-cache openvswitch iproute2 dropbear
+# Added iptables right here 👇
+RUN apk add --no-cache openvswitch iproute2 iptables dropbear
 RUN echo "root:password" | chpasswd
 COPY setup_router.sh /setup_router.sh
 RUN chmod +x /setup_router.sh

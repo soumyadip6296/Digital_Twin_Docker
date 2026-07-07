@@ -1,8 +1,13 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir streamlit requests pandas
+# Create a fresh venv and install streamlit dependencies
+RUN python -m venv /app/.venv && \
+    /app/.venv/bin/pip install --no-cache-dir streamlit requests pandas
+
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH=/app/.venv/bin:$PATH
 
 COPY dashboard.py .
 
