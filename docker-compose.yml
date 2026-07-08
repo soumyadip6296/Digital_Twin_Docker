@@ -35,6 +35,7 @@ services:
         ipv4_address: 10.199.2.10
       lan2_net:
         ipv4_address: 10.199.3.10
+      ai_net: {}
     ports:
       - "2222:22"
     command: /setup_router.sh
@@ -106,6 +107,7 @@ services:
       context: .
       dockerfile: Dockerfile.sniffer
     container_name: telemetry_sniffer
+    network_mode: "service:wan_router"
     privileged: true
     restart: unless-stopped
     environment:
@@ -114,11 +116,8 @@ services:
     depends_on:
       core_api:
         condition: service_healthy
-    networks:
-      - ai_net
-      - wan_net
-      - lan1_net
-      - lan2_net
+      wan_router:
+        condition: service_started
 
   ui_dashboard:
     build:

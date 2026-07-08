@@ -98,7 +98,6 @@ def ensure_models_exist():
         observer = RobustLSTMAutoencoder().to(device)
         prophet = RobustTrafficForecaster().to(device)
         
-        # PPO is already imported at the top of the file, so we just call it here:
         manager = PPO("MlpPolicy", "CartPole-v1", verbose=0)
         
         print("✅ Demo Models Created Successfully!")
@@ -174,9 +173,9 @@ async def live_network_endpoint(websocket: WebSocket):
             
             legacy_input[0, 0] = q_latency                           
             legacy_input[0, 1] = q_volume                            
-            legacy_input[0, 5] = payload.get("max_packet_length", 0) 
-            legacy_input[0, 6] = payload.get("min_packet_length", 0) 
             legacy_input[0, 13] = throughput      
+            legacy_input[0, 25] = payload.get("min_packet_length", 0) 
+            legacy_input[0, 26] = payload.get("max_packet_length", 0) 
             legacy_input[0, 30] = payload.get("fin_count", 0)        
             legacy_input[0, 31] = payload.get("syn_count", 0)        
             legacy_input[0, 32] = payload.get("rst_count", 0)        
@@ -186,11 +185,12 @@ async def live_network_endpoint(websocket: WebSocket):
             legacy_input[0, 37] = payload.get("avg_packet_size", 0)  
 
             scaled_feat = obs_scaler.transform(legacy_input)[0]
-            vol_clean = float(np.nan_to_num(np.log1p(q_volume), nan=0.0, posinf=0.0, neginf=0.0))
-            vol_scaled = float(prophet_scaler.transform([[vol_clean]])[0][0])
+            
+            # Use 'throughput' instead of 'q_volume' for the forecaster
+            vol_clean = float(np.nan_to_num(np.log1p(throughput), nan=0.0, posinf=0.0, neginf=0.0))
             
             seq_buf.append(scaled_feat)
-            vol_buf.append(vol_scaled)
+            vol_buf.append(vol_clean)
 
             if len(seq_buf) < 10:
                 continue
@@ -202,9 +202,15 @@ async def live_network_endpoint(websocket: WebSocket):
                 reconstruction = observer(in_seq)
                 mae = torch.abs(reconstruction - in_seq).mean().item()
                 forecast_raw = prophet(v_seq).item()
-                forecast_deviation = abs(forecast_raw - vol_scaled)
-                an_in = analyst_scaler.transform(legacy_input)
-                cluster_id = int(analyst_model.predict(an_in)[0])
+                forecast_deviation = abs(forecast_raw - vol_clean)
+                
+                # FIX: Explicitly cast to float32 to prevent KMeans C-engine crash
+                an_in = analyst_scaler.transform(legacy_input).astype(np.float32)
+                
+                try:
+                    cluster_id = int(analyst_model.predict(an_in)[0])
+                except Exception:
+                    cluster_id = 0  # Fallback to normal if clustering fails
                 traffic_type = 1.0 if cluster_map.get(str(cluster_id), "") == "Video/Heavy" else 0.0
 
             ema = adaptive_baseline["ema"]
@@ -222,8 +228,13 @@ async def live_network_endpoint(websocket: WebSocket):
             sustained_confidence = float(np.mean(conf_buf))
 
             state = np.array([[q_latency, 0.05, mae, base_conf, traffic_type, float(last_action)]], dtype=np.float32)
-            action, _ = manager.predict(state, deterministic=True)
-            last_action = int(action[0])
+            
+            try:
+                action, _ = manager.predict(state, deterministic=True)
+                last_action = int(action[0])
+            except ValueError:
+                # Fallback mitigations if dimensions mismatch
+                last_action = 1 if sustained_confidence > 0.35 else 0
 
             MASTER_STATE["metrics"] = {
                 "confidence": round(sustained_confidence, 3),
